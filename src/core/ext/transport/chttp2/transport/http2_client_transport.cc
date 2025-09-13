@@ -38,6 +38,7 @@
 #include "src/core/ext/transport/chttp2/transport/http2_settings.h"
 #include "src/core/ext/transport/chttp2/transport/http2_settings_manager.h"
 #include "src/core/ext/transport/chttp2/transport/http2_status.h"
+#include "src/core/ext/transport/chttp2/transport/http2_ztrace_collector.h"
 #include "src/core/ext/transport/chttp2/transport/internal_channel_arg_names.h"
 #include "src/core/ext/transport/chttp2/transport/message_assembler.h"
 #include "src/core/ext/transport/chttp2/transport/stream_data_queue.h"
@@ -693,7 +694,11 @@ auto Http2ClientTransport::WriteControlFrames() {
         return self->endpoint_.Write(std::move(output_buf),
                                      PromiseEndpoint::WriteArgs{});
       },
-      [] { return absl::OkStatus(); });
+      [self = RefAsSubclass<Http2ClientTransport>(), &buffer_length] {
+        self->ztrace_collector_->Append(
+            PromiseEndpointWriteTrace{buffer_length});
+        return absl::OkStatus();
+      });
 }
 
 void Http2ClientTransport::NotifyControlFramesWriteDone() {
@@ -880,8 +885,10 @@ auto Http2ClientTransport::OnMultiplexerLoopEnded() {
 Http2ClientTransport::Http2ClientTransport(
     PromiseEndpoint endpoint, GRPC_UNUSED const ChannelArgs& channel_args,
     std::shared_ptr<EventEngine> event_engine,
-    grpc_closure* on_receive_settings)
-    : endpoint_(std::move(endpoint)),
+    grpc_closure* on_receive_settings,
+    RefCountedPtr<channelz::SocketNode> channelz_socket_node)
+    : channelz::DataSource(channelz_socket_node),
+      endpoint_(std::move(endpoint)),
       stream_id_mutex_(/*Initial Stream Id*/ 1),
       should_reset_ping_clock_(false),
       incoming_header_in_progress_(false),
@@ -932,8 +939,11 @@ Http2ClientTransport::Http2ClientTransport(
       flow_control_(
           "PH2_Client",
           channel_args.GetBool(GRPC_ARG_HTTP2_BDP_PROBE).value_or(true),
-          &memory_owner_) {
+          &memory_owner_),
+      ztrace_collector_(std::make_shared<PromiseHttp2ZTraceCollector>()),
+      channelz_socket_node_(std::move(channelz_socket_node)) {
   GRPC_HTTP2_CLIENT_DLOG << "Http2ClientTransport Constructor Begin";
+  SourceConstructed();
 
   InitLocalSettings(settings_.mutable_local(), /*is_client=*/true);
   ReadSettingsFromChannelArgs(channel_args, settings_.mutable_local(),
@@ -1101,7 +1111,22 @@ Http2ClientTransport::~Http2ClientTransport() {
   GRPC_HTTP2_CLIENT_DLOG << "Http2ClientTransport Destructor Begin";
   GRPC_DCHECK(stream_list_.empty());
   memory_owner_.Reset();
+  SourceDestructing();
   GRPC_HTTP2_CLIENT_DLOG << "Http2ClientTransport Destructor End";
+}
+
+void Http2ClientTransport::AddData(channelz::DataSink sink) {
+  sink.AddData(
+      "Http2ClientTransport",
+      channelz::PropertyList()
+          .Set("settings", settings_.ChannelzProperties())
+          .Set("keepalive_time", keepalive_time_)
+          .Set("keepalive_timeout", keepalive_timeout_)
+          .Set("ping_timeout", ping_timeout_)
+          .Set("keepalive_permit_without_calls",
+               keepalive_permit_without_calls_)
+          .Set("flow_control", flow_control_.stats().ChannelzProperties()));
+  general_party_->ExportToChannelz("Http2ClientTransport Party", sink);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

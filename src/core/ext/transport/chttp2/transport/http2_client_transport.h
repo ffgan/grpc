@@ -33,6 +33,7 @@
 #include "src/core/ext/transport/chttp2/transport/http2_settings_promises.h"
 #include "src/core/ext/transport/chttp2/transport/http2_status.h"
 #include "src/core/ext/transport/chttp2/transport/http2_transport.h"
+#include "src/core/ext/transport/chttp2/transport/http2_ztrace_collector.h"
 #include "src/core/ext/transport/chttp2/transport/keepalive.h"
 #include "src/core/ext/transport/chttp2/transport/message_assembler.h"
 #include "src/core/ext/transport/chttp2/transport/ping_promise.h"
@@ -88,7 +89,8 @@ namespace http2 {
 // familiar with the PH2 project (Moving chttp2 to promises.)
 // TODO(tjagtap) : [PH2][P3] : Update the experimental status of the code before
 // http2 rollout begins.
-class Http2ClientTransport final : public ClientTransport {
+class Http2ClientTransport final : public ClientTransport,
+                                   public channelz::DataSource {
   // TODO(tjagtap) : [PH2][P3] Move the definitions to the header for better
   // inlining. For now definitions are in the cc file to
   // reduce cognitive load in the header.
@@ -97,7 +99,8 @@ class Http2ClientTransport final : public ClientTransport {
       PromiseEndpoint endpoint, GRPC_UNUSED const ChannelArgs& channel_args,
       std::shared_ptr<grpc_event_engine::experimental::EventEngine>
           event_engine,
-      grpc_closure* on_receive_settings);
+      grpc_closure* on_receive_settings,
+      RefCountedPtr<channelz::SocketNode> channelz_socket_node);
 
   Http2ClientTransport(const Http2ClientTransport&) = delete;
   Http2ClientTransport& operator=(const Http2ClientTransport&) = delete;
@@ -128,8 +131,15 @@ class Http2ClientTransport final : public ClientTransport {
   void AbortWithError();
 
   RefCountedPtr<channelz::SocketNode> GetSocketNode() const override {
+    return channelz_socket_node_;
+  }
+
+  std::unique_ptr<channelz::ZTrace> GetZTrace(absl::string_view name) override {
+    if (name == "transport_frames") return ztrace_collector_->MakeZTrace();
     return nullptr;
   }
+
+  void AddData(channelz::DataSink sink) override;
 
   auto TestOnlyTriggerWriteCycle() {
     return Immediate(writable_stream_list_.ForceReadyForWrite());
@@ -290,6 +300,10 @@ class Http2ClientTransport final : public ClientTransport {
                  // 2. It does not seem worth to have an extra condition for the
                  //    success cases which would be way more common.
                  self->keepalive_manager_.GotData();
+                 if (status.ok()) {
+                   self->ztrace_collector_->Append(
+                       PromiseEndpointReadTrace{status->size()});
+                 }
                  return status;
                });
   }
@@ -330,6 +344,10 @@ class Http2ClientTransport final : public ClientTransport {
                  // 2. It does not seem worth to have an extra condition for the
                  //    success cases which would be way more common.
                  self->keepalive_manager_.GotData();
+                 if (status.ok()) {
+                   self->ztrace_collector_->Append(
+                       PromiseEndpointReadTrace{status->Length()});
+                 }
                  return status;
                });
   }
@@ -576,6 +594,8 @@ class Http2ClientTransport final : public ClientTransport {
   GRPC_UNUSED bool enable_preferred_rx_crypto_frame_advertisement_;
   MemoryOwner memory_owner_;
   chttp2::TransportFlowControl flow_control_;
+  std::shared_ptr<PromiseHttp2ZTraceCollector> ztrace_collector_;
+  RefCountedPtr<channelz::SocketNode> channelz_socket_node_;
 };
 
 // Since the corresponding class in CHTTP2 is about 3.9KB, our goal is to

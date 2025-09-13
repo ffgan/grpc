@@ -209,6 +209,9 @@ void Chttp2Connector::OnHandshakeDone(absl::StatusOr<HandshakerArgs*> result) {
         LOG(ERROR) << "Failed to take endpoint.";
         result = GRPC_ERROR_CREATE("Failed to take endpoint.");
       }
+      RefCountedPtr<channelz::SocketNode> socket_node =
+          http2::CreateChannelzSocketNode(event_engine_endpoint.get(),
+                                          (*result)->args);
       // Create the PromiseEndpoint
       PromiseEndpoint promise_endpoint(std::move(event_engine_endpoint),
                                        std::move((*result)->read_buffer));
@@ -223,7 +226,7 @@ void Chttp2Connector::OnHandshakeDone(absl::StatusOr<HandshakerArgs*> result) {
       // Http2ClientTransport does not take ownership of the channel args.
       result_->transport = new http2::Http2ClientTransport(
           std::move(promise_endpoint), (*result)->args, event_engine_ptr,
-          &on_receive_settings_);
+          &on_receive_settings_, std::move(socket_node));
       result_->channel_args = std::move((*result)->args);
       GRPC_DCHECK_NE(result_->transport, nullptr);
       timer_handle_ = event_engine_->RunAfter(
