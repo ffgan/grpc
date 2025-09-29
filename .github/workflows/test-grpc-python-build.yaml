@@ -4,6 +4,8 @@ on: [push]
 jobs:
   setuptools:
     runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04
     steps:
       - uses: actions/checkout@v5
         with:
@@ -33,6 +35,8 @@ jobs:
 
   pyproject:
     runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04
     steps:
       - uses: actions/checkout@v5
         with:
@@ -65,6 +69,8 @@ jobs:
 
   pyproject-with-build-system:
     runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04
     steps:
       - uses: actions/checkout@v5
         with:
